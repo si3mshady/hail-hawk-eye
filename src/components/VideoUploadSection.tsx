@@ -14,6 +14,9 @@ interface UploadedVideo {
 interface VideoResults {
   success: boolean;
   s3_key: string;
+  annotated_s3_key: string;  // NEW
+  original_video_url: string;  // NEW
+  annotated_video_url: string;  // NEW
   processing_params: {
     frame_interval: number;
   };
@@ -54,13 +57,12 @@ export const VideoUploadSection = () => {
 
   const handleVideoSelect = (files: FileList | null) => {
     if (!files) return;
-
     const newVideos: UploadedVideo[] = [];
-    
+
     Array.from(files).forEach((file) => {
       const isVideo = file.type.startsWith('video/');
       const allowedTypes = ['video/mp4', 'video/avi', 'video/mov', 'video/mkv', 'video/webm'];
-      
+
       if (!isVideo || !allowedTypes.some(type => file.type === type || file.name.toLowerCase().endsWith(type.split('/')[1]))) {
         toast({
           title: "Invalid file type",
@@ -69,7 +71,6 @@ export const VideoUploadSection = () => {
         });
         return;
       }
-
       if (file.size > 500 * 1024 * 1024) { // 500MB limit
         toast({
           title: "File too large",
@@ -78,15 +79,12 @@ export const VideoUploadSection = () => {
         });
         return;
       }
-
       const uploadedVideo: UploadedVideo = {
         file,
         id: Math.random().toString(36).substr(2, 9)
       };
-
       newVideos.push(uploadedVideo);
     });
-
     if (newVideos.length > 0) {
       setUploadedVideos(prev => [...prev, ...newVideos]);
       toast({
@@ -119,28 +117,23 @@ export const VideoUploadSection = () => {
   const getPresignedUrl = async (videoFile: File) => {
     const serverUrl = localStorage.getItem('hailvision_endpoint');
     const apiKey = localStorage.getItem('hailvision_api_key');
-
     if (!serverUrl) {
       throw new Error("Backend not configured");
     }
-
     const headers: HeadersInit = {
       'Content-Type': 'application/json'
     };
     if (apiKey) {
       headers['Authorization'] = `Bearer ${apiKey}`;
     }
-
     const response = await fetch(`${serverUrl}/video/upload-url`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ filename: videoFile.name })
     });
-
     if (!response.ok) {
       throw new Error(`Failed to get upload URL: ${response.status} ${response.statusText}`);
     }
-
     return await response.json();
   };
 
@@ -148,8 +141,8 @@ export const VideoUploadSection = () => {
     const response = await fetch(presignedUrl, {
       method: 'PUT',
       body: videoFile,
-      headers: { 
-        'Content-Type': videoFile.type 
+      headers: {
+        'Content-Type': videoFile.type
       }
     });
     return response.ok;
@@ -158,27 +151,23 @@ export const VideoUploadSection = () => {
   const processVideo = async (s3Key: string) => {
     const serverUrl = localStorage.getItem('hailvision_endpoint');
     const apiKey = localStorage.getItem('hailvision_api_key');
-
     const headers: HeadersInit = {
       'Content-Type': 'application/json'
     };
     if (apiKey) {
       headers['Authorization'] = `Bearer ${apiKey}`;
     }
-
     const response = await fetch(`${serverUrl}/video/process`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ 
+      body: JSON.stringify({
         s3_key: s3Key,
         frame_interval: 30 // Process 1 frame per second
       })
     });
-
     if (!response.ok) {
       throw new Error(`Video processing failed: ${response.status} ${response.statusText}`);
     }
-
     return await response.json();
   };
 
@@ -191,7 +180,6 @@ export const VideoUploadSection = () => {
       });
       return;
     }
-
     const serverUrl = localStorage.getItem('hailvision_endpoint');
     if (!serverUrl) {
       toast({
@@ -201,43 +189,57 @@ export const VideoUploadSection = () => {
       });
       return;
     }
-
     setIsProcessing(true);
     setUploadProgress(0);
     setVideoResults(null);
-
     try {
       const videoFile = uploadedVideos[0].file; // Process first video
-      
+
       // Step 1: Get presigned URL
       setUploadStatus('Getting upload URL...');
       setUploadProgress(10);
       const { upload_url, s3_key } = await getPresignedUrl(videoFile);
-      
+
       // Step 2: Upload to S3
       setUploadStatus('Uploading video...');
       setUploadProgress(30);
       const uploadSuccess = await uploadToS3(upload_url, videoFile);
-      
+
       if (!uploadSuccess) {
         throw new Error("Failed to upload video to S3");
       }
-      
-      // Step 3: Process video
-      setUploadStatus('Processing video for hail damage...');
-      setUploadProgress(60);
+
+      // Step 3: Process video (this now takes longer due to annotation)
+      setUploadStatus('Processing video and creating annotations...');
+      setUploadProgress(50);
       const results = await processVideo(s3_key);
-      
+
+      // DEBUG: Log the full response to see what we're getting
+      console.log("🔍 FULL backend response:", results);
+      console.log("🔍 Response keys:", Object.keys(results || {}));
+      console.log("🔍 Has original_video_url?", !!results?.original_video_url);
+      console.log("🔍 Has annotated_video_url?", !!results?.annotated_video_url);
+      console.log("🔍 Original URL:", results?.original_video_url);
+      console.log("🔍 Annotated URL:", results?.annotated_video_url);
+
       // Step 4: Display results
       setUploadProgress(100);
       setUploadStatus('Complete!');
       setVideoResults(results);
 
-      toast({
-        title: "Video analysis complete",
-        description: `Found damage in ${results.detection_summary.frames_with_damage} frames (${results.detection_summary.damage_percentage.toFixed(1)}% of video)`
-      });
-
+      // FIXED: Access nested results structure correctly
+      const detectionSummary = results?.results?.detection_summary;
+      if (detectionSummary) {
+        toast({
+          title: "Video analysis complete",
+          description: `Found damage in ${detectionSummary.frames_with_damage || 0} frames (${(detectionSummary.damage_percentage || 0).toFixed(1)}% of video)`
+        });
+      } else {
+        toast({
+          title: "Video analysis complete",
+          description: "Processing completed successfully"
+        });
+      }
     } catch (error) {
       console.error("Video processing error:", error);
       setUploadStatus(`Error: ${error instanceof Error ? error.message : 'Unknown error occurred'}`);
@@ -260,7 +262,6 @@ export const VideoUploadSection = () => {
             Upload drone inspection videos for comprehensive hail damage analysis
           </p>
         </div>
-
         {/* Video Upload area */}
         <Card className={`p-8 border-2 border-dashed transition-all duration-300 ${
           isDragging ? 'border-vibranium bg-vibranium/5' : 'border-border'
@@ -276,15 +277,15 @@ export const VideoUploadSection = () => {
             <p className="text-muted-foreground mb-6">
               Supports MP4, AVI, MOV, MKV, WebM files up to 500MB each
             </p>
-            
-            <Button 
+
+            <Button
               onClick={() => fileInputRef.current?.click()}
               variant="outline"
               size="lg"
             >
               Choose Videos
             </Button>
-            
+
             <input
               ref={fileInputRef}
               type="file"
@@ -295,7 +296,6 @@ export const VideoUploadSection = () => {
             />
           </div>
         </Card>
-
         {/* Video list */}
         {uploadedVideos.length > 0 && (
           <div className="mt-8">
@@ -309,11 +309,11 @@ export const VideoUploadSection = () => {
                   >
                     <X className="h-4 w-4" />
                   </button>
-                  
+
                   <div className="w-full h-32 bg-muted rounded mb-2 flex items-center justify-center">
                     <Video className="h-8 w-8 text-muted-foreground" />
                   </div>
-                  
+
                   <p className="text-sm font-medium truncate">{video.file.name}</p>
                   <p className="text-xs text-muted-foreground">
                     {(video.file.size / 1024 / 1024).toFixed(1)} MB
@@ -321,7 +321,6 @@ export const VideoUploadSection = () => {
                 </Card>
               ))}
             </div>
-
             <div className="text-center space-y-4">
               {isProcessing && (
                 <div className="space-y-2">
@@ -329,11 +328,11 @@ export const VideoUploadSection = () => {
                   <p className="text-sm text-muted-foreground">{uploadStatus}</p>
                 </div>
               )}
-              
-              <Button 
-                onClick={handleVideoUpload} 
+
+              <Button
+                onClick={handleVideoUpload}
                 disabled={isProcessing}
-                size="lg" 
+                size="lg"
                 className="vibranium-glow"
               >
                 <Zap className="mr-2 h-5 w-5" />
@@ -342,7 +341,6 @@ export const VideoUploadSection = () => {
             </div>
           </div>
         )}
-
         {/* Video Results Section */}
         {videoResults && (
           <div className="mt-16">
